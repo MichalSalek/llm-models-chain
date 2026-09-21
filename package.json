@@ -1,0 +1,42 @@
+{
+  "name": "llm-models-chain",
+  "version": "0.1.0",
+  "description": "Ordered list of OpenAI-compatible providers with failover, a per-run down list and a USD budget",
+  "keywords": [
+    "llm",
+    "openai",
+    "fallback",
+    "failover",
+    "rate-limit",
+    "budget"
+  ],
+  "license": "MIT",
+  "author": "Michal Salek <contact@michalsalek.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MichalSalek/llm-models-chain.git"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "node --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm run test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^24.0.0"
+  }
+}
