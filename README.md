@@ -61,16 +61,18 @@ What happens to a provider depends on whether trying it again inside the same ru
 
 | Result | Error | Provider |
 | --- | --- | --- |
-| Timeout or connection refused | `OfflineError` | dropped for the run |
+| Timeout, connection refused, body cut off mid-read | `OfflineError` | dropped for the run |
 | `429` | `QuotaError` | dropped for the run |
 | `401`, `403` | `AuthError` | dropped for the run |
 | Other non-2xx | `ResponseError` | stays, call moves on |
-| Body is not JSON, or no completion | `ResponseError` | stays, call moves on |
-| `json()` cannot find an object in the answer | `ResponseError` | stays, call moves on |
+| Body is not a completion object, or the completion is empty | `ResponseError` | stays, call moves on |
+| `finish_reason` is `length`, so the answer was cut off | `ResponseError` | stays, call moves on |
+| `json()` cannot find JSON in the answer | `ResponseError` | stays, call moves on |
 
-The last three are the model being unhelpful rather than the provider being broken, so the provider is used
-again on the next call. When every provider in the pool is down, the chain throws `ChainExhaustedError` with
-the reason collected from each one. When the budget is spent, it throws `BudgetError` without calling anything.
+The bottom four are the model being unhelpful rather than the provider being broken, so the provider is used
+again on the next call. Tokens reported on a refused or truncated answer still count: the call was billed
+either way. When every provider in the pool is down, the chain throws `ChainExhaustedError` with the reason
+collected from each one. When the budget is spent, it throws `BudgetError` without calling anything.
 
 ## API
 
@@ -104,7 +106,9 @@ Without `price` a provider counts as free and never moves the budget.
 Type: `number`\
 Optional.
 
-Ceiling for the whole run. Checked before each attempt, so the budget can be exceeded by at most one call.
+Ceiling for the whole run, counted from the usage providers report. It is checked before each attempt, so a
+sequential run can go over by at most one call. Calls you start concurrently are each checked against the
+spend recorded at that moment, so N calls in flight can go over by up to N.
 
 ### chain.text(call, options?)
 
@@ -115,8 +119,7 @@ and temperature 0.2.
 
 ### chain.json(call, options?)
 
-Same, with the outermost JSON object parsed out of the answer. Typed as `json<T>()` if you validate the shape
-yourself.
+Same, with the JSON value parsed out of the answer. Typed as `json<T>()` if you validate the shape yourself.
 
 ### options.filter
 
@@ -152,8 +155,10 @@ The providers still usable in this run, in order.
 
 ### parseJsonLoose(text)
 
-Exported separately. Strips `<think>` blocks and code fences, then takes the text between the first `{` and the
-last `}`. Throws when there is no object.
+Exported separately. Walks the opening brackets left to right and returns the first one that parses all the
+way to the last matching closing bracket. Prose around the answer, a ```json fence and a stray brace in the
+explanation all fall out of that, without rewriting anything inside a string value. A top level array stays an
+array. Throws when nothing parses.
 
 ## License
 

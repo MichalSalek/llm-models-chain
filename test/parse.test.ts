@@ -23,7 +23,20 @@ describe('parseJsonLoose', () => {
     assert.deepEqual(parseJsonLoose('noise {"a":{"b":[1,2]}} noise'), { a: { b: [1, 2] } })
   })
 
-  it('throws when there is no object at all', () => {
-    assert.throws(() => parseJsonLoose('I cannot help with that'), /no JSON object in response/)
+  it('keeps a top level array as an array', () => {
+    assert.deepEqual(parseJsonLoose('[{"a":1},{"a":2}]'), [{ a: 1 }, { a: 2 }])
+  })
+
+  it('does not rewrite the inside of a string value', () => {
+    assert.deepEqual(parseJsonLoose('{"s":"```json"}'), { s: '```json' })
+    assert.deepEqual(parseJsonLoose('{"s":"<think>keep me</think>"}'), { s: '<think>keep me</think>' })
+  })
+
+  it('walks past a brace that belongs to the prose', () => {
+    assert.deepEqual(parseJsonLoose('Example {x}. Answer: {"ok":true}'), { ok: true })
+  })
+
+  it('throws when there is no JSON at all', () => {
+    assert.throws(() => parseJsonLoose('I cannot help with that'), /no JSON value in response/)
   })
 })

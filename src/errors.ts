@@ -1,3 +1,5 @@
+import type { Usage } from './types.ts'
+
 /** The provider refused on quota or rate limit. It is dropped for the rest of the run. */
 export class QuotaError extends Error {
   readonly provider: string
@@ -34,11 +36,14 @@ export class AuthError extends Error {
 export class ResponseError extends Error {
   readonly provider: string
   readonly status: number
-  constructor(provider: string, status: number, message: string) {
+  /** Set when the provider reported usage anyway. A refused answer that was still billed has to be counted. */
+  readonly usage: Usage | undefined
+  constructor(provider: string, status: number, message: string, usage?: Usage) {
     super(`${provider}: ${message}`)
     this.name = 'ResponseError'
     this.provider = provider
     this.status = status
+    this.usage = usage
   }
 }
 

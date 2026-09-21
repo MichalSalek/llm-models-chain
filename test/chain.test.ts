@@ -202,6 +202,64 @@ describe('LlmChain', () => {
     assert.equal(chain.report().usage.usd, 0)
   })
 
+  it('counts an answer that was billed but refused', async () => {
+    fresh()
+    queue('/a/chat/completions', {
+      status: 200,
+      body: JSON.stringify({ choices: [{ message: { content: '' } }], usage: { prompt_tokens: 80, completion_tokens: 0 } }),
+    })
+    const chain = new LlmChain({ providers: providers('a', 'b') })
+
+    const result = await chain.text({ user: 'hi' })
+
+    assert.equal(result.provider, 'b')
+    assert.equal(chain.report().usage.input, 180, 'the refused answer was billed 80 tokens and has to be counted')
+  })
+
+  it('moves on when the answer was cut off at max_tokens', async () => {
+    fresh()
+    queue('/a/chat/completions', {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: '{"half":' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }),
+    })
+    const chain = new LlmChain({ providers: providers('a', 'b') })
+
+    const result = await chain.text({ user: 'hi' })
+
+    assert.equal(result.provider, 'b')
+    assert.deepEqual(chain.report().down, [], 'a cut off answer is the caller asking for too few tokens, not a broken provider')
+  })
+
+  it('splits total_tokens instead of counting the completion half twice', async () => {
+    fresh()
+    queue('/a/chat/completions', {
+      status: 200,
+      body: JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { total_tokens: 10, completion_tokens: 4 } }),
+    })
+    const chain = new LlmChain({ providers: providers('a') })
+
+    await chain.text({ user: 'hi' })
+
+    const { usage } = chain.report()
+    assert.equal(usage.input, 6)
+    assert.equal(usage.output, 4)
+  })
+
+  it('reports a body that is not a completion object instead of throwing a TypeError', async () => {
+    fresh()
+    queue('/a/chat/completions', { status: 200, body: 'null' })
+    const chain = new LlmChain({ providers: providers('a', 'b') })
+
+    const errors: string[] = []
+    const result = await chain.text({ user: 'hi' }, { onAttempt: (a) => errors.push(a.error.name) })
+
+    assert.equal(result.provider, 'b')
+    assert.deepEqual(errors, ['ResponseError'])
+  })
+
   it('refuses a pool with duplicate ids', () => {
     assert.throws(() => new LlmChain({ providers: [...providers('a'), ...providers('a')] }), /duplicate provider id: a/)
   })

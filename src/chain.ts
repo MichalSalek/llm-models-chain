@@ -60,8 +60,8 @@ export class LlmChain {
   }
 
   /**
-   * Same as text(), with the outermost JSON object parsed out of the answer. A provider that returns
-   * something unparseable is treated as a failed attempt, not as a broken provider.
+   * Same as text(), with the JSON value parsed out of the answer. A provider that returns something
+   * unparseable is treated as a failed attempt, not as a broken provider.
    */
   json<T = unknown>(call: ChatCall, options: CallOptions = {}): Promise<Result<T>> {
     return this.#run(call, options, (raw, provider) => {
@@ -78,21 +78,24 @@ export class LlmChain {
     let last: Error | null = null
 
     for (const provider of pool) {
+      // Re-checked here, not only when the pool was taken: another call in flight may have dropped this
+      // provider while we were waiting on the previous one.
+      if (this.#down.has(provider.id)) continue
       this.#assertBudget()
       let raw: Raw
       try {
         raw = await this.#call(provider, call)
       } catch (e) {
         last = e as Error
+        // A refused answer can still have been billed, so its usage counts against the budget.
+        if (e instanceof ResponseError && e.usage) this.#addUsage(e.usage)
         const dropped = e instanceof QuotaError || e instanceof OfflineError || e instanceof AuthError
         if (dropped) this.#down.set(provider.id, (e as Error).message.slice(0, 200))
         options.onAttempt?.({ provider: provider.id, error: e as Error, dropped })
         continue
       }
 
-      this.#usage.input += raw.usage.input
-      this.#usage.output += raw.usage.output
-      this.#usage.usd += raw.usage.usd
+      this.#addUsage(raw.usage)
 
       try {
         return { value: transform(raw, provider), provider: provider.id, usage: raw.usage }
@@ -106,6 +109,12 @@ export class LlmChain {
       throw new ChainExhaustedError([...this.#down].map(([provider, reason]) => ({ provider, reason })))
     }
     throw last ?? new ChainExhaustedError([])
+  }
+
+  #addUsage(usage: Usage): void {
+    this.#usage.input += usage.input
+    this.#usage.output += usage.output
+    this.#usage.usd += usage.usd
   }
 
   #assertBudget(): void {
@@ -143,7 +152,16 @@ export class LlmChain {
       throw new OfflineError(provider.id, (e as Error).message)
     }
 
-    const text = await response.text()
+    // The body is read inside its own try: a connection reset after the headers arrived is still a network
+    // failure, and it must not escape as a raw error that leaves the provider in the pool.
+    let text: string
+    try {
+      text = await response.text()
+    } catch (e) {
+      if (response.status === 429) throw new QuotaError(provider.id, `HTTP 429, body unreadable: ${(e as Error).message}`)
+      throw new OfflineError(provider.id, `body unreadable: ${(e as Error).message}`)
+    }
+
     if (response.status === 429) throw new QuotaError(provider.id, text.slice(0, 200))
     if (response.status === 401 || response.status === 403) throw new AuthError(provider.id, response.status, text.slice(0, 200))
     if (!response.ok) throw new ResponseError(provider.id, response.status, `HTTP ${response.status} ${text.slice(0, 200)}`)
@@ -152,25 +170,41 @@ export class LlmChain {
   }
 
   #readCompletion(provider: Provider, text: string): Raw {
-    let parsed: {
-      choices?: { message?: { content?: string } }[]
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-    }
+    let parsed: unknown
     try {
       parsed = JSON.parse(text)
     } catch {
       throw new ResponseError(provider.id, 200, `body is not JSON: ${text.slice(0, 200)}`)
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new ResponseError(provider.id, 200, `body is not a completion object: ${text.slice(0, 200)}`)
+    }
 
-    const content = parsed.choices?.[0]?.message?.content
-    if (!content) throw new ResponseError(provider.id, 200, 'empty completion')
+    const payload = parsed as {
+      choices?: { message?: { content?: string }; finish_reason?: string }[]
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+    }
+    const usage = this.#readUsage(provider, payload.usage)
+    const choice = payload.choices?.[0]
+    const content = choice?.message?.content
 
-    // Providers that report only total_tokens are counted as input, which is the cheaper half. Reporting a
-    // guess as output would overstate the spend and stop a run early.
-    const input = parsed.usage?.prompt_tokens ?? parsed.usage?.total_tokens ?? 0
-    const output = parsed.usage?.completion_tokens ?? 0
+    // Usage rides along on the error: a refused or truncated answer was billed all the same, and leaving it
+    // out would let a provider burn the budget without the budget ever noticing.
+    if (!content) throw new ResponseError(provider.id, 200, 'empty completion', usage)
+    if (choice?.finish_reason === 'length') {
+      throw new ResponseError(provider.id, 200, 'answer was cut off at max_tokens', usage)
+    }
+
+    return { text: content, usage }
+  }
+
+  #readUsage(provider: Provider, reported: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined): Usage {
+    const output = reported?.completion_tokens ?? 0
+    // total_tokens covers both halves, so the prompt half is what is left of it after the completion half.
+    // Treating total as input on its own would count the completion tokens twice.
+    const input = reported?.prompt_tokens ?? Math.max(0, (reported?.total_tokens ?? 0) - output)
     const price = provider.price
     const usd = price ? (input * price.input + output * price.output) / 1_000_000 : 0
-    return { text: content, usage: { input, output, usd } }
+    return { input, output, usd }
   }
 }
